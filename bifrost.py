@@ -35,6 +35,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import shutil
 import subprocess
 import sys
@@ -154,9 +155,8 @@ def ensure_layout(s: Settings) -> None:
     CONFIG.write_text("".join(f"{k}: {json.dumps(v, ensure_ascii=False)}\n" for k, v in config.items()))
     CONFIG.chmod(0o600)
 
-    # Nyare fdroidserver vill att kategorier är definierade
-    (FDROID / "config").mkdir(exist_ok=True)
-    (FDROID / "config" / "categories.yml").write_text(f"Bifrost:\n  name: {json.dumps(s.name)}\n")
+    # Kategorier används inte (gav bara varningar i loggen)
+    (FDROID / "config" / "categories.yml").unlink(missing_ok=True)
 
     icon_src = APP_DIR / "icon.png"
     if icon_src.exists():
@@ -469,7 +469,6 @@ def write_metadata(state: dict, index: dict) -> bool:
         desc = info.get("description", "")
         lines = [
             MANAGED_HEADER,
-            "Categories:\n  - Bifrost\n",
             f"AuthorName: {yaml_str(info.get('owner', ''))}\n",
             f"SourceCode: {yaml_str(info.get('html_url', ''))}\n",
         ]
@@ -658,12 +657,17 @@ def serve(s: Settings) -> http.server.ThreadingHTTPServer:
 
 
 def main(argv: list[str]) -> int:
+    # Som PID 1 i Docker ignoreras SIGTERM annars, och containern dödas först
+    # efter 10 s ("exited with code 137"). Avsluta snyggt direkt i stället.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     s = Settings()
     ensure_layout(s)
     fp = repo_fingerprint()
     log(f"{s.name} startar. Repo: {s.url}/repo  Fingeravtryck: {fp}")
     if not s.repos:
         log("BIFROST_REPOS är tomt – butiken startar utan appar")
+    for repo, pattern in s.sources:
+        log(f"Källa: {repo}" + ("" if pattern == "*.apk" else f"  (filer: {pattern})"))
     if s.repos and not s.token:
         log("GITHUB_TOKEN saknas – bara publika repon kan läsas")
 
