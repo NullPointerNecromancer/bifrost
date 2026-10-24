@@ -110,6 +110,8 @@ Byter du `BIFROST_URL` senare (t.ex. när du får lokal DNS) behöver enheterna 
 
 Bifrost hämtar appens beskrivning och källkodslänk från GitHub-repots *About*-text. Ikonen läses ur APK:n, så appen behöver PNG-ikoner (`mipmap-*/ic_launcher.png`). Vektorikoner kan F-Droid inte visa.
 
+Hittar F-Droid ingen ikon i APK:n (vanligt för Flutter-appar som Plezy) hämtar Bifrost en från appens GitHub-repo i stället – från `fastlane/metadata/android/en-US/images/icon.png` eller appens `mipmap-xxxhdpi/ic_launcher.png`. Vill du byta ikon själv: lägg en PNG som `data/fdroid/metadata/<paketnamn>/en-US/icon.png` och tryck Synka nu.
+
 Vill du skriva en längre beskrivning själv: redigera `data/fdroid/metadata/<paketnamn>.yml` och lägg till raden `# bifrost: manual` överst. Då låter Bifrost filen vara.
 
 ## Felsökning

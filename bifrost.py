@@ -330,6 +330,7 @@ def fetch_new_apks(s: Settings, state: dict) -> int:
             "html_url": info.get("html_url") or f"https://github.com/{repo}",
             "homepage": info.get("homepage") or "",
             "owner": (info.get("owner") or {}).get("login", repo.split("/")[0]),
+            "default_branch": info.get("default_branch") or "main",
         }
 
         picked = [
@@ -417,7 +418,9 @@ def read_index() -> dict:
             apps[pkg] = {
                 "name": a.get("name") or (a.get("localized", {}).get("en-US", {}).get("name")) or pkg,
                 "summary": a.get("summary") or "",
-                "icon": f"icons-640/{a['icon']}" if a.get("icon") else "",
+                "icon": (f"icons-640/{a['icon']}" if a.get("icon") else
+                         f"{pkg}/en-US/{a['localized']['en-US']['icon']}"
+                         if a.get("localized", {}).get("en-US", {}).get("icon") else ""),
                 "versions": [
                     {"name": v.get("versionName"), "code": v.get("versionCode"),
                      "file": v.get("apkName"), "sha256": v.get("hash")}
@@ -450,6 +453,68 @@ def read_index() -> dict:
 
 def yaml_str(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+# Vanliga platser för en apps ikon i dess GitHub-repo, bäst först
+ICON_PATHS = [
+    "fastlane/metadata/android/en-US/images/icon.png",
+    "metadata/en-US/images/icon.png",
+    "android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png",   # Flutter/React Native
+    "app/src/main/res/mipmap-xxxhdpi/ic_launcher.png",
+    "android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png",
+    "app/src/main/res/mipmap-xxhdpi/ic_launcher.png",
+    "app/src/main/ic_launcher-playstore.png",
+]
+ICON_RETRY_SECONDS = 24 * 3600
+
+
+def fetch_missing_icons(s: Settings, state: dict, index: dict) -> bool:
+    """
+    F-Droid hittar inte alltid ikonen i APK:n (t.ex. Flutter-appar med omdöpta
+    resurser). Då hämtar vi en PNG från appens GitHub-repo och lägger den som
+    metadata/<paket>/en-US/icon.png, som fdroid tar med i indexet.
+    Returnerar True om någon ikon lades till.
+    """
+    sha_to_repo = {a["sha256"]: a["repo"] for a in state.get("assets", {}).values() if "sha256" in a}
+    tried = state.setdefault("icon_tried", {})
+    added = False
+
+    for pkg, app in index.items():
+        dest = METADATA / pkg / "en-US" / "icon.png"
+        if app.get("icon") or dest.exists():
+            continue
+        if time.time() - tried.get(pkg, 0) < ICON_RETRY_SECONDS:
+            continue
+        repo = next((sha_to_repo.get(v["sha256"]) for v in app["versions"] if v["sha256"] in sha_to_repo), None)
+        if not repo:
+            continue
+        tried[pkg] = time.time()
+        branch = state.get("repos", {}).get(repo, {}).get("default_branch", "main")
+
+        for path in ICON_PATHS:
+            req = gh_request(s, f"/repos/{repo}/contents/{path}?ref={branch}", accept="application/vnd.github.raw")
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = resp.read(5 << 20)
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    continue
+                log(f"{repo}: kunde inte hämta ikon ({e.code})")
+                break
+            except urllib.error.URLError as e:
+                log(f"{repo}: kunde inte hämta ikon: {e.reason}")
+                break
+            if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+            log(f"Ikon för {pkg} hämtad från {repo}/{path}")
+            added = True
+            break
+        else:
+            log(f"{repo}: hittade ingen ikon för {pkg} i repot")
+    save_state(state)
+    return added
 
 
 def write_metadata(state: dict, index: dict) -> bool:
@@ -607,6 +672,9 @@ def sync_once(s: Settings) -> bool:
         ok = run_fdroid_update(create_metadata=False)
         state["needs_update"] = not ok
         save_state(state)
+
+    if ok and fetch_missing_icons(s, state, read_index()):
+        ok = run_fdroid_update(create_metadata=False)
 
     write_landing_page(s, read_index(), repo_fingerprint())
     log(f"Synk klar: {new} nya filer, {len(read_index())} appar i butiken")
