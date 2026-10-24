@@ -1,0 +1,60 @@
+name: Bygg Docker-image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write   # för att publicera till ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bygg image
+        run: docker build -t bifrost:test .
+
+      - name: Röktest – tom butik ska få ett signerat index och en startsida
+        run: |
+          mkdir -p "$RUNNER_TEMP/data"
+          docker run --rm -v "$RUNNER_TEMP/data:/data" \
+            -e BIFROST_URL=http://192.168.1.51:8095 \
+            bifrost:test python3 /app/bifrost.py --once
+          sudo ls -la "$RUNNER_TEMP/data/fdroid/repo"
+          sudo test -f "$RUNNER_TEMP/data/fdroid/repo/index-v1.jar" || sudo test -f "$RUNNER_TEMP/data/fdroid/repo/entry.jar"
+          sudo test -f "$RUNNER_TEMP/data/www/index.html"
+          sudo grep -q fingerprint= "$RUNNER_TEMP/data/www/index.html"
+
+      - name: Röktest – webbservern svarar
+        run: |
+          docker run -d --name bifrost-test -p 18080:8080 -v "$RUNNER_TEMP/data:/data" \
+            -e BIFROST_URL=http://192.168.1.51:8095 bifrost:test
+          for i in $(seq 1 30); do curl -fsS http://localhost:18080/ >/dev/null && break; sleep 2; done
+          curl -fsS http://localhost:18080/ | grep -q "Lägg till butiken"
+          curl -fsS -o /dev/null http://localhost:18080/repo/index-v1.json || curl -fsS -o /dev/null http://localhost:18080/repo/index-v2.json
+          test "$(curl -s -o /dev/null -w '%{http_code}' --path-as-is http://localhost:18080/repo/../config.yml)" = 404
+          docker logs bifrost-test
+          docker rm -f bifrost-test
+
+      - name: Logga in på ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publicera
+        if: github.event_name != 'pull_request'
+        run: |
+          # Image-namn måste vara gemener (användarnamnet har versaler)
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/bifrost"
+          docker tag bifrost:test "$IMAGE:latest"
+          docker tag bifrost:test "$IMAGE:sha-${GITHUB_SHA::7}"
+          docker push "$IMAGE:latest"
+          docker push "$IMAGE:sha-${GITHUB_SHA::7}"

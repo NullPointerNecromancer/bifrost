@@ -1,0 +1,21 @@
+# Klistra in i en ny stack i Dockge (namn: bifrost).
+# Ändra sökvägen till din dataset och fyll i GITHUB_TOKEN under ".env" i Dockge.
+services:
+  bifrost:
+    image: ghcr.io/nullpointernecromancer/bifrost:latest
+    container_name: bifrost
+    restart: unless-stopped
+    ports:
+      - "8095:8080"
+    environment:
+      # Adressen familjens enheter når butiken på. Hemma + VPN = serverns LAN-adress.
+      BIFROST_URL: http://192.168.1.51:8095
+      # GitHub-repon vars releaser ska in i butiken, separerade med mellanslag
+      BIFROST_REPOS: NullPointerNecromancer/shieldknapp
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      SYNC_INTERVAL_MIN: 15
+      KEEP_RELEASES: 3
+      TZ: Europe/Stockholm
+    volumes:
+      # Här ligger butikens signeringsnyckel – ta backup på den!
+      - /mnt/Rodin-27TB-Z2/docker/bifrost/data:/data
