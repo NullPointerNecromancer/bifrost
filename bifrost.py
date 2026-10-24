@@ -13,7 +13,9 @@ Allt sparas under /data:
 
 Inställningar via miljövariabler (se README):
   BIFROST_URL            adressen enheterna når butiken på, t.ex. http://192.168.1.51:8095
-  BIFROST_REPOS          GitHub-repon, t.ex. "NullPointerNecromancer/shieldknapp other/app"
+  BIFROST_REPOS          GitHub-repon, t.ex. "NullPointerNecromancer/shieldknapp other/app".
+                         Lägg till :mönster för att välja filer, t.ex.
+                         "edde746/plezy:*arm64-v8a*" – arkiv (.tar.gz/.zip) packas upp automatiskt
   GITHUB_TOKEN           behövs för privata repon (läsrättighet räcker)
   SYNC_INTERVAL_MIN      hur ofta GitHub kollas (standard 15)
   KEEP_RELEASES          hur många av de senaste releaserna som hämtas per repo (standard 3)
@@ -25,6 +27,7 @@ Inställningar via miljövariabler (se README):
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import html
 import http.server
@@ -35,10 +38,13 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 DATA = Path(os.environ.get("BIFROST_DATA", "/data"))
@@ -77,7 +83,14 @@ def log(msg: str) -> None:
 class Settings:
     def __init__(self) -> None:
         self.url = env("BIFROST_URL", "http://localhost:8095").rstrip("/")
-        self.repos = [r for r in re.split(r"[\s,]+", env("BIFROST_REPOS")) if r]
+        # Varje post är "ägare/repo" eller "ägare/repo:mönster"
+        self.sources: list[tuple[str, str]] = []
+        for entry in (e for e in re.split(r"[\s,]+", env("BIFROST_REPOS")) if e):
+            repo, _, pattern = entry.partition(":")
+            if not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
+                raise SystemExit(f"Ogiltigt repo-namn i BIFROST_REPOS: {entry!r} (skriv ägare/repo eller ägare/repo:mönster)")
+            self.sources.append((repo, pattern or "*.apk"))
+        self.repos = [r for r, _ in self.sources]
         self.token = env("GITHUB_TOKEN")
         self.interval_min = max(1, int(env("SYNC_INTERVAL_MIN", "15") or 15))
         self.keep_releases = max(1, int(env("KEEP_RELEASES", "3") or 3))
@@ -89,9 +102,6 @@ class Settings:
         )
         self.port = int(env("PORT", "8080") or 8080)
 
-        bad = [r for r in self.repos if not re.fullmatch(r"[\w.-]+/[\w.-]+", r)]
-        if bad:
-            raise SystemExit(f"Ogiltiga repo-namn i BIFROST_REPOS: {bad} (skriv ägare/repo)")
 
 
 # --------------------------------------------------------------------------- #
@@ -231,6 +241,59 @@ def download_asset(s: Settings, repo: str, asset_id: int, dest: Path) -> str:
     return sha.hexdigest()
 
 
+ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar", ".zip")
+MAX_APK_BYTES = 1 << 30   # 1 GB – skydd mot trasiga eller elaka arkiv
+
+
+def is_archive(name: str) -> bool:
+    return name.lower().endswith(ARCHIVE_SUFFIXES)
+
+
+def wanted(name: str, pattern: str) -> bool:
+    """Ska den här release-filen med? Bara APK:er och arkiv som matchar mönstret."""
+    lower = name.lower()
+    if not (lower.endswith(".apk") or is_archive(lower)):
+        return False
+    return fnmatch.fnmatch(lower, pattern.lower())
+
+
+def _copy_member(src, dest: Path) -> str:
+    sha = hashlib.sha256()
+    total = 0
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    with src, open(tmp, "wb") as out:
+        while chunk := src.read(1 << 16):
+            total += len(chunk)
+            if total > MAX_APK_BYTES:
+                raise ValueError("APK:n i arkivet är orimligt stor")
+            sha.update(chunk)
+            out.write(chunk)
+    tmp.replace(dest)
+    return sha.hexdigest()
+
+
+def extract_apk(archive: Path, dest: Path) -> str:
+    """
+    Plockar ut den enda .apk-filen ur ett arkiv till dest och returnerar dess sha256.
+    Inget packas upp till disk förutom själva APK:n, så sökvägar i arkivet spelar ingen roll.
+    """
+    if archive.name.lower().endswith(".zip"):
+        with zipfile.ZipFile(archive) as zf:
+            apks = [i for i in zf.infolist() if not i.is_dir() and i.filename.lower().endswith(".apk")]
+            if len(apks) != 1:
+                raise ValueError(f"arkivet innehåller {len(apks)} APK-filer, väntade exakt 1")
+            return _copy_member(zf.open(apks[0]), dest)
+
+    with tarfile.open(archive, "r:*") as tf:
+        apks = [m for m in tf.getmembers() if m.isfile() and m.name.lower().endswith(".apk")]
+        if len(apks) != 1:
+            raise ValueError(f"arkivet innehåller {len(apks)} APK-filer, väntade exakt 1")
+        src = tf.extractfile(apks[0])
+        if src is None:
+            raise ValueError("kunde inte läsa APK:n i arkivet")
+        return _copy_member(src, dest)
+
+
 def load_state() -> dict:
     try:
         return json.loads(STATE_FILE.read_text())
@@ -250,7 +313,7 @@ def fetch_new_apks(s: Settings, state: dict) -> int:
     state.setdefault("assets", {})
     state.setdefault("repos", {})
 
-    for repo in s.repos:
+    for repo, pattern in s.sources:
         try:
             info = gh_json(s, f"/repos/{repo}")
             releases = gh_json(s, f"/repos/{repo}/releases?per_page=30")
@@ -281,7 +344,7 @@ def fetch_new_apks(s: Settings, state: dict) -> int:
         for rel in picked:
             for asset in rel.get("assets", []):
                 name = asset.get("name", "")
-                if not name.lower().endswith(".apk"):
+                if not wanted(name, pattern):
                     continue
                 key = str(asset["id"])
                 if key in state["assets"]:
@@ -291,9 +354,24 @@ def fetch_new_apks(s: Settings, state: dict) -> int:
                 dest = REPO / f"{safe_repo}-{safe_tag}-{asset['id']}.apk"
                 log(f"{repo}: hämtar {name} från {rel.get('tag_name')}")
                 try:
-                    sha = download_asset(s, repo, asset["id"], dest)
-                except Exception as e:  # noqa: BLE001
-                    log(f"{repo}: nedladdning misslyckades: {e}")
+                    if is_archive(name):
+                        with tempfile.TemporaryDirectory(dir=DATA) as tmpdir:
+                            archive = Path(tmpdir) / re.sub(r"[^\w.-]", "_", name)
+                            download_asset(s, repo, asset["id"], archive)
+                            sha = extract_apk(archive, dest)
+                        log(f"{repo}: packade upp APK ur {name}")
+                    else:
+                        sha = download_asset(s, repo, asset["id"], dest)
+                except (ValueError, tarfile.TarError, zipfile.BadZipFile) as e:
+                    # Filen är trasig eller har fel innehåll – hämta den inte igen varje synk
+                    log(f"{repo}: hoppar över {name}: {e}")
+                    dest.unlink(missing_ok=True)
+                    state["assets"][key] = {"repo": repo, "tag": rel.get("tag_name"), "name": name,
+                                            "skipped": str(e)}
+                    continue
+                except Exception as e:  # noqa: BLE001 – nätverksfel o.d., försök igen nästa gång
+                    log(f"{repo}: {name} misslyckades: {e}")
+                    dest.unlink(missing_ok=True)
                     continue
                 state["assets"][key] = {
                     "repo": repo,
@@ -376,7 +454,7 @@ def yaml_str(value: str) -> str:
 
 def write_metadata(state: dict, index: dict) -> bool:
     """Fyller i beskrivning, källkodslänk m.m. från GitHub. Returnerar True om något ändrades."""
-    sha_to_repo = {a["sha256"]: a["repo"] for a in state.get("assets", {}).values()}
+    sha_to_repo = {a["sha256"]: a["repo"] for a in state.get("assets", {}).values() if "sha256" in a}
     changed = False
 
     for pkg, app in index.items():
@@ -473,7 +551,9 @@ ul.apps{{list-style:none;margin:0;padding:0}}
 .app{{display:flex;gap:14px;align-items:center;padding:10px 0;border-top:1px solid rgba(127,127,127,.2)}}
 .app:first-child{{border-top:0}}.app img{{width:48px;height:48px;border-radius:12px;flex:none}}
 .meta{{flex:1;display:flex;flex-direction:column}}.meta span,.meta small{{color:var(--mut)}}
-.dl{{color:var(--acc);text-decoration:none;font-weight:600}}.empty{{color:var(--mut)}}
+.dl{{color:var(--acc);text-decoration:none;font-weight:600}}
+.sync{{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:16px}}.sync small{{color:var(--mut)}}
+.sync button{{font:inherit;font-weight:600;border:1px solid var(--acc);color:var(--acc);background:none;border-radius:10px;padding:8px 14px;cursor:pointer}}.empty{{color:var(--mut)}}
 </style></head>
 <body><main>
 <header><img src="icon.png" alt=""><div><h1>{e(s.name)}</h1><p class="lead">{e(s.description)}</p></div></header>
@@ -494,7 +574,11 @@ ul.apps{{list-style:none;margin:0;padding:0}}
 
 <section><h2>Appar</h2><ul class="apps">
 {apps_html}
-</ul></section>
+</ul>
+<form class="sync" method="post" action="sync">
+  <button type="submit">Synka nu</button>
+  <small>Senast kollat {e(time.strftime("%Y-%m-%d %H:%M"))} · kollar GitHub var {s.interval_min}:e minut</small>
+</form></section>
 </main></body></html>
 """
     tmp = WWW / "index.html.tmp"
@@ -530,6 +614,10 @@ def sync_once(s: Settings) -> bool:
     return ok
 
 
+# Sätts av "Synka nu" på startsidan och väcker synk-loopen direkt
+SYNC_NOW = threading.Event()
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     extensions_map = {
         **http.server.SimpleHTTPRequestHandler.extensions_map,
@@ -546,6 +634,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if re.search(r"/(index[^/]*|entry)\.(jar|json|html)$|/$", self.path):
             self.send_header("Cache-Control", "no-cache")
         super().end_headers()
+
+    def do_POST(self):
+        if self.path.rstrip("/").endswith("/sync") or self.path == "/sync":
+            log("Synk begärd från startsidan")
+            SYNC_NOW.set()
+            self.send_response(303)
+            self.send_header("Location", "./")
+            self.end_headers()
+            return
+        self.send_error(404)
 
     def log_message(self, fmt, *args):
         if env("BIFROST_ACCESS_LOG").lower() in ("1", "true", "yes"):
@@ -578,7 +676,9 @@ def main(argv: list[str]) -> int:
             sync_once(s)
         except Exception as e:  # noqa: BLE001 – loopen får aldrig dö
             log(f"Synk misslyckades: {e!r}")
-        time.sleep(s.interval_min * 60)
+        # Vänta till nästa intervall – eller tills någon trycker "Synka nu"
+        SYNC_NOW.wait(timeout=s.interval_min * 60)
+        SYNC_NOW.clear()
 
 
 if __name__ == "__main__":

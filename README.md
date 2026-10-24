@@ -66,12 +66,36 @@ Loggen i Dockge visar vad som händer, t.ex. `shieldknapp: hämtar shieldknapp.a
 
 > Varje ny version måste ha ett högre `versionCode` än den förra. Det är så Android och butiken vet vad som är nyast. ShieldKnapp använder byggets körnummer, så det sköter sig självt.
 
+## Appar från andra (open source på GitHub)
+
+Bifrost kan hämta appar direkt från utvecklarens egna GitHub-releaser – ingen Play Butik, ingen mellanhand. Appen behåller utvecklarens signering.
+
+Många projekt släpper flera filer per version (en per processortyp, eller packade i arkiv). Lägg då till ett **mönster** efter ett kolon:
+
+```yaml
+BIFROST_REPOS: >-
+  NullPointerNecromancer/shieldknapp
+  edde746/plezy:*arm64-v8a*
+```
+
+- Mönstret matchas mot filnamnen i releasen (`*` = vad som helst, skiftläget spelar ingen roll).
+- Matchar det ett arkiv (`.tar.gz`, `.tgz`, `.tar`, `.zip`) packar Bifrost upp APK:n automatiskt. Arkivet måste innehålla exakt en APK.
+- Utan mönster tas alla `.apk`-filer.
+- Utkast (draft) hoppas alltid över, och pre-releaser om inte `INCLUDE_PRERELEASES=true`.
+- `arm64-v8a` passar alla moderna telefoner (alla Pixel med GrapheneOS) och Shield. Osäker? `adb shell getprop ro.product.cpu.abilist`.
+
+Publika repon behöver ingen extra behörighet på token.
+
+## Synka nu
+
+Bifrost kollar GitHub var 15:e minut. Vill du inte vänta: tryck **Synka nu** längst ned på startsidan.
+
 ## Inställningar
 
 | Variabel | Standard | Betydelse |
 |---|---|---|
 | `BIFROST_URL` | – | Adressen enheterna når butiken på. Bestämmer också QR-koden. |
-| `BIFROST_REPOS` | – | `ägare/repo` med mellanslag emellan |
+| `BIFROST_REPOS` | – | `ägare/repo` eller `ägare/repo:mönster`, med mellanslag emellan |
 | `GITHUB_TOKEN` | – | Krävs för privata repon |
 | `SYNC_INTERVAL_MIN` | `15` | Hur ofta GitHub kollas |
 | `KEEP_RELEASES` | `3` | Hur många av de senaste releaserna som hämtas per app |
