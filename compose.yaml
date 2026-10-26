@@ -13,7 +13,7 @@ services:
       # GitHub-repon vars releaser ska in i butiken, separerade med mellanslag
       # ägare/repo eller ägare/repo:mönster, mellanslag emellan.
       # Citattecknen behövs – annars tolkar YAML * som en specialtecken.
-      BIFROST_REPOS: "NullPointerNecromancer/shieldknapp edde746/plezy:*arm64-v8a*"
+      BIFROST_REPOS: "NullPointerNecromancer/shieldknapp edde746/plezy:*arm64-v8a* leanbitlab-org/LtvLauncher:*arm64-v8a* meddouribadis/arclauncher:*arm64-v8a*"
       GITHUB_TOKEN: ${GITHUB_TOKEN}
       SYNC_INTERVAL_MIN: 15
       KEEP_RELEASES: 3
